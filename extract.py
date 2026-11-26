@@ -1,12 +1,12 @@
 import time
 import requests
+from utils import save_json
 
 API_URL = "https://api.github.com"
 
 class GitHubClient:
     """Handle authentication, rate limits and pagination for GitHub REST API
-       Create a reusable http session and add the token to its authorisation headers
-       
+       Create a reusable http session and add the token to its authorisation headers  
     """
     
     def __init__(self, token):
@@ -69,8 +69,8 @@ def fetch_merged_prs(client, owner, repo, since, max_prs=None):
         since (str): ISO 8601 timestamp; only pull requests merged on or after it are returned.
         max_prs (int, optional): Maximum number of pull requests to return. Defaults to None (no limit).
 
-        Returns:
-            list: Pull request data for merged pull requests on or after `since`.
+    Returns:
+        list: Pull request data for merged pull requests on or after `since`.
     """
     url = f"{API_URL}/repos/{owner}/{repo}/pulls"
     params = {"state": "closed", "sort": "updated", "direction": "desc", "per_page": 100}
@@ -91,6 +91,57 @@ def fetch_merged_prs(client, owner, repo, since, max_prs=None):
         
     return merged
 
+
+def extract_pr_data(client, owner, repo, since, max_prs=None, out_dir="output/extract"):
+    """Fetch merged PRs plus their reviews, checks and target branch rules, and save raw JSON
+
+    Args:
+        client (_type_): _description_
+        owner (_type_): _description_
+        repo (_type_): _description_
+        since (_type_): _description_
+        max_prs (_type_, optional): _description_. Defaults to None.
+        out_dir (str, optional): _description_. Defaults to "output/extract".
+    """
+    prs = fetch_merged_prs(client, owner, repo, since, max_prs)
+    print("Merged PRs fetched:", len(prs))
+    
+    reviews = {}
+    check_runs = {}
+    statuses = {}
+    
+    for i, pr in enumerate(prs, start=1):
+        number = pr["number"]
+        sha = pr["head"]["sha"]
+        print(f"[{i}/{len(prs)}] PR #{number}")
+        
+        reviews[number] = fetch_reviews(client, owner, repo, number)
+        check_runs[number] = fetch_check_runs(client, owner, repo, sha)
+        statuses[number] = fetch_statuses(client, owner, repo, sha)
+        
+    base_branch_names = set()
+    for pr in prs:
+        base_branch_names.add(pr["base"]["ref"])
+        
+    branches = {}
+    for branch_name in base_branch_names:
+        try:
+            branches[branch_name] = fetch_branch(client, owner, repo, branch_name)
+        except requests.HTTPError as e:
+            if e.response.status_code != 404:
+                raise # unexpected error, throw it
+            else:     
+                branches[branch_name] = None # branch was not found, deleted after merge
+
+    
+    save_json(prs, f"{out_dir}/pull_requests.json")
+    save_json(reviews, f"{out_dir}/reviews.json")
+    save_json(check_runs, f"{out_dir}/check_runs.json")
+    save_json(statuses, f"{out_dir}/statuses.json")
+    save_json(branches, f"{out_dir}/branches.json")
+
+
+# helper functions
 def fetch_reviews(client, owner, repo, pr_number):
     url = f"{API_URL}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
     resp = client.get(url, params={"per_page": 100})
@@ -100,4 +151,16 @@ def fetch_check_runs(client, owner, repo, sha):
     url = f"{API_URL}/repos/{owner}/{repo}/commits/{sha}/check-runs"
     resp = client.get(url, params={"per_page": 100})
     return resp.json()["check_runs"]
+
+def fetch_statuses(client, owner, repo, sha):
+    """Return commit statuses (the older CI reporting system) for one commit."""
+    url = f"{API_URL}/repos/{owner}/{repo}/commits/{sha}/status"
+    resp = client.get(url, params={"per_page": 100})
+    return resp.json()["statuses"]
+
+def fetch_branch(client, owner, repo, branch):
+    """Return a branch's details, including its protection rules (required checks)."""
+    url = f"{API_URL}/repos/{owner}/{repo}/branches/{branch}"
+    return client.get(url).json()
+
     
