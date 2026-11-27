@@ -3,6 +3,7 @@ import requests
 from utils import save_json
 
 API_URL = "https://api.github.com"
+MAX_RETRIES = 3
 
 class GitHubClient:
     """Handle authentication, rate limits and pagination for GitHub REST API
@@ -19,7 +20,7 @@ class GitHubClient:
         
     
     def get(self, url, params=None):
-        """GET a URL, wait and retry if we hit the rate limit
+        """GET a URL, wait and retry if we hit the rate limit. Retries github server if server errors
 
         Args:
             url (str): URL to send the GET request to.
@@ -28,7 +29,7 @@ class GitHubClient:
         Returns:
             requests.Response: Successful response for the requested page.
         """
-        
+        retries = 0
         while True:
             resp = self.session.get(url, params=params, timeout=30)
             
@@ -38,9 +39,19 @@ class GitHubClient:
                 print(f"Rate limit hit, sleeping {wait:.1f}s...")
                 time.sleep(wait)
                 continue
-                
+            
+            # github server error try again
+            # 5x errors are githubs issue
+            if resp.status_code >= 500 and retries < MAX_RETRIES:
+                retries += 1
+                wait = 2 ** retries
+                print(f"Github error {resp.status_code}, retrying in {wait}s ({retries}/{MAX_RETRIES})...")
+                time.sleep(wait)
+                continue
+            
             resp.raise_for_status()
             return resp
+            
         
     def paginate(self, url, params=None):
         """Yield every item across all pages of a list endpoint
